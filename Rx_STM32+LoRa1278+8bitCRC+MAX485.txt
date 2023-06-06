@@ -1,0 +1,161 @@
+#include <SPI.h>
+#include <LoRa_STM32.h>
+#include <ModbusRtu.h>
+
+#define SS PA4
+#define RST PB0
+#define DI0 PA1
+
+#define TX_P 17
+#define BAND 433E6
+#define ENCRYPT 0x78
+
+#define G PB13
+#define R PB12
+#define TXEN PB7
+
+Modbus slave(1, Serial, TXEN);
+
+String distanceA;
+String distanceB;
+String sensorValue;
+
+String outgoing;
+byte msgCount = 0;
+byte localAddress = 0xBB;
+byte destination = 0xFF;
+long lastSendTime = 0;
+int interval = 50;
+int temp = 0;
+
+const int buttonPin = PB8;
+int buttonState = 0;
+
+// Data array for Modbus network sharing
+uint16_t au16data[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+
+void setup() {
+  Serial.begin(9600);
+  slave.start();
+
+  pinMode(R, OUTPUT);
+  pinMode(G, OUTPUT);
+  pinMode(buttonPin, INPUT);
+
+  while (!Serial);
+  //Serial.println("Two Way Communication");
+  LoRa.setPins(SS, RST, DI0);
+
+  if (!LoRa.begin(433E6)) {
+    //Serial.println("Starting LoRa failed!");
+    while (1);
+  }
+}
+
+void loop() {
+  buttonState = digitalRead(buttonPin);
+
+  if (buttonState == HIGH) {
+    temp = 1000;
+  } else {
+    temp = 2000;
+  }
+
+  if (millis() - lastSendTime > interval) {
+    String message = String(temp);
+    sendMessage(message);
+    lastSendTime = millis();
+    interval = random(50) + 100;
+  }
+
+  onReceive(LoRa.parsePacket());
+  slave.poll(au16data, 16);
+}
+
+void sendMessage(String outgoing) {
+  uint8_t crc = custom_crc((uint8_t*)outgoing.c_str(), outgoing.length());
+
+  LoRa.beginPacket();
+  LoRa.write(destination);
+  LoRa.write(localAddress);
+  LoRa.write(msgCount);
+  LoRa.write(outgoing.length() + 1);
+  LoRa.print(outgoing);
+  LoRa.write(crc);
+  LoRa.endPacket();
+  msgCount++;
+}
+
+void onReceive(int packetSize) {
+  if (packetSize == 0) return;
+
+  int recipient = LoRa.read();
+  byte sender = LoRa.read();
+  byte incomingMsgId = LoRa.read();
+  byte incomingLength = LoRa.read();
+
+  String LoRaData = LoRa.readString();
+
+  uint8_t received_crc = LoRaData[incomingLength - 1];
+  uint8_t calculated_crc = custom_crc((uint8_t*)LoRaData.c_str(), incomingLength - 1);
+  // Serial.println(received_crc);
+  // Serial.println(calculated_crc);
+  delay(1000);
+
+  if (received_crc == calculated_crc) {
+    int pos1, pos2, pos3;
+
+    pos1 = LoRaData.indexOf('/');
+    pos2 = LoRaData.indexOf('&');
+    pos3 = LoRaData.indexOf('#');
+
+    distanceA = LoRaData.substring(0, pos1);
+    distanceB = LoRaData.substring(pos1 + 1, pos2);
+    sensorValue = LoRaData.substring(pos2 + 1, pos3);
+
+    au16data[0] = distanceA.toInt();
+    au16data[1] = distanceB.toInt();
+    au16data[2] = sensorValue.toInt();
+    //  slave.poll(au16data, 16);
+
+    if (distanceA == "OK") {
+      Serial.println("Condition Good");
+      digitalWrite(R, LOW);
+      digitalWrite(G, HIGH);
+      delay(200);
+      digitalWrite(G, LOW);
+      delay(500);
+    } else if (distanceA == "NG") {
+      Serial.println("Condition Abnormal!");
+      digitalWrite(R, HIGH);
+      digitalWrite(G, LOW);
+      delay(400);
+      digitalWrite(R, LOW);
+      delay(200);
+    } else {
+      digitalWrite(G, LOW);
+      digitalWrite(R, LOW);
+      Serial.print(distanceA);
+      Serial.print('/');
+      Serial.print(distanceB);
+      Serial.print('&');
+      Serial.print(sensorValue);
+      Serial.println();
+    }
+  } else {
+    // Serial.println("CRC check failed");
+  }
+
+  
+  delay(1000);
+}
+
+uint8_t custom_crc(uint8_t* data, uint8_t len) {
+  uint8_t crc = 0;
+  for (uint8_t i = 0; i < len; i++) {
+    crc ^= data[i];
+  }
+  return crc;
+
+  
+}
